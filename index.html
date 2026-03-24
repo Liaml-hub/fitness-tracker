@@ -822,37 +822,86 @@
     let supabaseClient = null;
 
     function getSupabase() {
-      if (!supabaseClient && state.settings.supabaseUrl && state.settings.supabaseKey) {
-        supabaseClient = supabase.createClient(state.settings.supabaseUrl, state.settings.supabaseKey);
+      if (state.settings.supabaseUrl && state.settings.supabaseKey) {
+        if (!supabaseClient) {
+          supabaseClient = supabase.createClient(state.settings.supabaseUrl, state.settings.supabaseKey);
+        }
+        return supabaseClient;
       }
-      return supabaseClient;
+      return null;
+    }
+
+    function resetSupabaseClient() {
+      supabaseClient = null;
     }
 
     async function syncToCloud() {
       const client = getSupabase();
-      if (!client) return;
+      if (!client) return { success: false, error: 'No client' };
       try {
-        await client.from('fitness_data').upsert({
+        const { error } = await client.from('fitness_data').upsert({
           id: 'main',
           games: state.games,
           activeGameId: state.activeGameId,
           updated_at: new Date().toISOString()
         }, { onConflict: 'id' });
-      } catch (err) { console.error('Sync failed:', err); }
+        if (error) {
+          console.error('Sync error:', error);
+          return { success: false, error: error.message };
+        }
+        console.log('Sync successful');
+        return { success: true };
+      } catch (err) {
+        console.error('Sync failed:', err);
+        return { success: false, error: err.message };
+      }
     }
 
     async function loadFromCloud() {
       const client = getSupabase();
-      if (!client) return false;
+      if (!client) return { success: false, error: 'No client' };
       try {
-        const { data } = await client.from('fitness_data').select('*').eq('id', 'main').single();
+        const { data, error } = await client.from('fitness_data').select('*').eq('id', 'main').single();
+        if (error && error.code !== 'PGRST116') {
+          console.error('Load error:', error);
+          return { success: false, error: error.message };
+        }
         if (data) {
           if (data.games) state.games = data.games;
           if (data.activeGameId) state.activeGameId = data.activeGameId;
-          return true;
+          console.log('Loaded from cloud:', Object.keys(state.games).length, 'games');
+          return { success: true };
         }
-      } catch (err) { console.error('Load failed:', err); }
-      return false;
+        return { success: false, error: 'No data' };
+      } catch (err) {
+        console.error('Load failed:', err);
+        return { success: false, error: err.message };
+      }
+    }
+
+    async function forceSyncFromCloud() {
+      showVoiceStatus('Syncing from cloud...', 3000);
+      const result = await loadFromCloud();
+      if (result.success) {
+        localStorage.setItem('fitness_games', JSON.stringify(state.games));
+        localStorage.setItem('active_game_id', state.activeGameId || '');
+        showVoiceStatus('Sync complete!', 2000);
+        render();
+      } else {
+        showVoiceStatus('Sync failed: ' + result.error, 3000);
+      }
+      return result;
+    }
+
+    async function forceSyncToCloud() {
+      showVoiceStatus('Syncing to cloud...', 3000);
+      const result = await syncToCloud();
+      if (result.success) {
+        showVoiceStatus('Sync complete!', 2000);
+      } else {
+        showVoiceStatus('Sync failed: ' + result.error, 3000);
+      }
+      return result;
     }
 
     // ============== GAME LOGIC ==============
@@ -965,12 +1014,15 @@
     }
 
     async function loadGame() {
-      const cloudLoaded = await loadFromCloud();
-      if (!cloudLoaded) {
+      const cloudResult = await loadFromCloud();
+      if (!cloudResult.success) {
         const savedGames = localStorage.getItem('fitness_games');
         const savedActiveId = localStorage.getItem('active_game_id');
         if (savedGames) state.games = JSON.parse(savedGames);
         if (savedActiveId && state.games[savedActiveId]) state.activeGameId = savedActiveId;
+      } else {
+        localStorage.setItem('fitness_games', JSON.stringify(state.games));
+        localStorage.setItem('active_game_id', state.activeGameId || '');
       }
       if (state.activeGameId && state.games[state.activeGameId]) {
         const game = getCurrentGame();
@@ -1158,6 +1210,7 @@ If unclear, return:
     let isRecording = false;
 
     function renderSettings() {
+      const hasSupabase = state.settings.supabaseUrl && state.settings.supabaseKey;
       return `
         <div class="min-h-screen flex items-center justify-center p-4">
           <div class="card max-w-md w-full fade-in">
@@ -1176,14 +1229,22 @@ If unclear, return:
                 <input type="password" id="veniceKey" value="${state.settings.veniceKey}" placeholder="Get from venice.ai/settings/api" class="input-field">
               </div>
               <div>
-                <label class="block text-sm font-semibold text-gray-700 mb-2">Supabase URL <span class="text-gray-400 font-normal">(optional - cloud sync)</span></label>
+                <label class="block text-sm font-semibold text-gray-700 mb-2">Supabase URL <span class="text-gray-400 font-normal">(for cloud sync)</span></label>
                 <input type="text" id="supabaseUrl" value="${state.settings.supabaseUrl}" placeholder="https://xxx.supabase.co" class="input-field">
               </div>
               <div>
-                <label class="block text-sm font-semibold text-gray-700 mb-2">Supabase Key <span class="text-gray-400 font-normal">(optional)</span></label>
+                <label class="block text-sm font-semibold text-gray-700 mb-2">Supabase Key <span class="text-gray-400 font-normal">(anon public key)</span></label>
                 <input type="password" id="supabaseKey" value="${state.settings.supabaseKey}" placeholder="eyJ..." class="input-field">
               </div>
-              <button id="saveSettings" class="btn-primary w-full mt-6">Get Started</button>
+              <p class="text-xs text-gray-500">Need a Supabase table named "fitness_data" with columns: id (text, primary), games (jsonb), activeGameId (text), updated_at (timestamp)</p>
+              <button id="saveSettings" class="btn-primary w-full">Save Settings</button>
+              ${hasSupabase ? `
+                <div class="flex gap-3 mt-4">
+                  <button id="syncFromCloud" class="btn-outline flex-1 text-sm py-3">Pull from Cloud</button>
+                  <button id="syncToCloud" class="btn-secondary flex-1 text-sm py-3">Push to Cloud</button>
+                </div>
+                <p class="text-xs text-gray-500 text-center mt-2">Auto-syncs on every change. Use buttons if data seems wrong.</p>
+              ` : ''}
             </div>
           </div>
         </div>`;
@@ -1624,8 +1685,17 @@ If unclear, return:
         state.settings.supabaseUrl = document.getElementById('supabaseUrl').value;
         state.settings.supabaseKey = document.getElementById('supabaseKey').value;
         saveSettings();
+        resetSupabaseClient();
         state.currentView = 'home';
         render();
+      });
+
+      document.getElementById('syncFromCloud')?.addEventListener('click', () => {
+        forceSyncFromCloud();
+      });
+
+      document.getElementById('syncToCloud')?.addEventListener('click', () => {
+        forceSyncToCloud();
       });
 
       document.getElementById('goSettings')?.addEventListener('click', () => { state.currentView = 'settings'; render(); });
@@ -2021,30 +2091,3 @@ If unclear, return:
   </script>
 </body>
 </html>
-
-{
-  "name": "fitness-tracker",
-  "private": true,
-  "version": "1.0.0",
-  "type": "module",
-  "scripts": {
-    "dev": "vite",
-    "build": "vite build",
-    "preview": "vite preview"
-  },
-  "dependencies": {
-    "@supabase/supabase-js": "^2.39.0",
-    "react": "^18.2.0",
-    "react-dom": "^18.2.0",
-    "canvas-confetti": "^1.9.2"
-  },
-  "devDependencies": {
-    "@types/react": "^18.2.43",
-    "@types/react-dom": "^18.2.17",
-    "@vitejs/plugin-react": "^4.2.1",
-    "autoprefixer": "^10.4.16",
-    "postcss": "^8.4.32",
-    "tailwindcss": "^3.4.0",
-    "vite": "^5.0.8"
-  }
-}
