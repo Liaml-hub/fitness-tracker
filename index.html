@@ -1245,6 +1245,7 @@ If unclear, return:
                 </div>
                 <p class="text-xs text-gray-500 text-center mt-2">Auto-syncs on every change. Use buttons if data seems wrong.</p>
               ` : ''}
+              <button id="backFromSettings" class="btn-ghost w-full mt-4">Back</button>
             </div>
           </div>
         </div>`;
@@ -1696,6 +1697,15 @@ If unclear, return:
 
       document.getElementById('syncToCloud')?.addEventListener('click', () => {
         forceSyncToCloud();
+      });
+
+      document.getElementById('backFromSettings')?.addEventListener('click', () => {
+        const savedGames = localStorage.getItem('fitness_games');
+        if (savedGames) state.games = JSON.parse(savedGames);
+        const savedActiveId = localStorage.getItem('active_game_id');
+        if (savedActiveId && state.games[savedActiveId]) state.activeGameId = savedActiveId;
+        state.currentView = 'home';
+        render();
       });
 
       document.getElementById('goSettings')?.addEventListener('click', () => { state.currentView = 'settings'; render(); });
