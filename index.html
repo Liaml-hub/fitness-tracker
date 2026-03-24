@@ -1592,8 +1592,33 @@ If unclear, return:
       }
       
       if (gameTab === 'dev') {
+        let timerEditHtml = '';
+        if (g.hasTimer && g.endTime) {
+          const now = new Date();
+          const end = new Date(g.endTime);
+          const diffMs = end - now;
+          const remainingMins = Math.max(0, Math.floor(diffMs / 60000));
+          const remainingSecs = Math.max(0, Math.floor((diffMs % 60000) / 1000));
+          timerEditHtml = `
+            <div class="card mb-4" style="background: linear-gradient(135deg, #e0f2fe 0%, #bae6fd 100%); border: 2px solid #7dd3fc;">
+              <h3 class="text-lg font-bold text-blue-800 mb-4">Timer Settings</h3>
+              <div class="grid grid-cols-2 gap-3">
+                <div>
+                  <label class="block text-sm font-semibold text-gray-700 mb-2">Minutes Remaining</label>
+                  <input type="number" id="devTimerMins" value="${remainingMins}" min="0" class="input-field font-semibold text-center">
+                </div>
+                <div>
+                  <label class="block text-sm font-semibold text-gray-700 mb-2">Seconds Remaining</label>
+                  <input type="number" id="devTimerSecs" value="${remainingSecs}" min="0" max="59" class="input-field font-semibold text-center">
+                </div>
+              </div>
+              <button id="devUpdateTimer" class="btn-primary w-full mt-4">Update Timer</button>
+            </div>`;
+        }
+        
         tabContent = `
           <div class="fade-in space-y-4">
+            ${timerEditHtml}
             <div class="card" style="background: linear-gradient(135deg, #fff7ed 0%, #ffedd5 100%); border: 2px solid #fed7aa;">
               <h3 class="text-lg font-bold text-orange-800 mb-4">Dev Mode</h3>
               <div class="space-y-4">
@@ -1910,6 +1935,20 @@ If unclear, return:
         render();
       });
 
+      document.getElementById('devUpdateTimer')?.addEventListener('click', () => {
+        const g = getCurrentGame();
+        if (!g || !g.hasTimer) return;
+        
+        const mins = parseInt(document.getElementById('devTimerMins')?.value) || 0;
+        const secs = parseInt(document.getElementById('devTimerSecs')?.value) || 0;
+        const totalMs = (mins * 60 + secs) * 1000;
+        
+        g.endTime = new Date(Date.now() + totalMs).toISOString();
+        saveGame();
+        speak("Timer updated!");
+        render();
+      });
+
       document.getElementById('devEndGame')?.addEventListener('click', () => {
         const g = getCurrentGame();
         if (g) {
@@ -1956,10 +1995,17 @@ If unclear, return:
     // ============== VOICE RECOGNITION ==============
     let recognition = null;
     let silenceTimer = null;
+    let finalTranscriptBuffer = '';
 
     function startVoiceRecognition() {
       if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
         speak("Your browser doesn't support voice recognition. Try Chrome.");
+        return;
+      }
+
+      // If already recording, stop it
+      if (isRecording && recognition) {
+        recognition.stop();
         return;
       }
 
@@ -1969,37 +2015,102 @@ If unclear, return:
       recognition.interimResults = true;
       recognition.lang = 'en-US';
 
-      recognition.onstart = () => { isRecording = true; render(); };
-      recognition.onend = () => { isRecording = false; if (silenceTimer) clearTimeout(silenceTimer); render(); };
+      finalTranscriptBuffer = '';
 
-      recognition.onresult = async (event) => {
+      recognition.onstart = () => { 
+        isRecording = true; 
+        showVoiceStatus('Listening... Speak now', 10000);
+        render(); 
+      };
+
+      recognition.onend = () => { 
+        isRecording = false;
         if (silenceTimer) clearTimeout(silenceTimer);
         
+        // Process any remaining transcript when recognition ends
+        if (finalTranscriptBuffer.trim()) {
+          showVoiceStatus(`Processing: "${finalTranscriptBuffer.trim()}"`, 5000);
+          processSpeech(finalTranscriptBuffer.trim());
+          finalTranscriptBuffer = '';
+        }
+        render(); 
+      };
+
+      recognition.onresult = async (event) => {
+        // Clear the silence timer on new speech
+        if (silenceTimer) clearTimeout(silenceTimer);
+
+        let interimTranscript = '';
+        
+        // Collect all results
+        for (let i = event.resultIndex; i < event.results.length; i++) {
+          const transcript = event.results[i][0].transcript;
+          if (event.results[i].isFinal) {
+            finalTranscriptBuffer += transcript;
+          } else {
+            interimTranscript += transcript;
+          }
+        }
+
+        // Show interim results
+        const displayText = finalTranscriptBuffer + interimTranscript;
+        if (displayText) {
+          showVoiceStatus(`"${displayText}"`, 10000);
+        }
+
+        // Set timer to process after 3 seconds of silence
         silenceTimer = setTimeout(async () => {
-          if (recognition) recognition.stop();
-          
-          let finalTranscript = '';
-          for (let i = event.resultIndex; i < event.results.length; i++) {
-            if (event.results[i].isFinal) finalTranscript += event.results[i][0].transcript;
+          if (recognition) {
+            try {
+              recognition.stop();
+            } catch (e) {
+              // Already stopped
+            }
           }
           
-          if (finalTranscript.trim()) await processSpeech(finalTranscript.trim());
+          // Process final transcript
+          const toProcess = finalTranscriptBuffer.trim();
+          finalTranscriptBuffer = '';
+          
+          if (toProcess) {
+            showVoiceStatus(`Processing: "${toProcess}"`, 5000);
+            await processSpeech(toProcess);
+          }
         }, 3000);
-        
-        let interim = '';
-        for (let i = event.resultIndex; i < event.results.length; i++) interim += event.results[i][0].transcript;
-        if (interim) showVoiceStatus(`"${interim}"`, 5000);
       };
 
       recognition.onerror = (event) => {
+        console.error('Speech recognition error:', event.error);
         isRecording = false;
         if (silenceTimer) clearTimeout(silenceTimer);
-        if (event.error === 'not-allowed') speak("I need microphone permission. Please allow it in your browser settings.");
-        else speak(getRandomResponse('error'));
+        
+        if (event.error === 'not-allowed') {
+          speak("I need microphone permission. Please allow it in your browser settings.");
+        } else if (event.error === 'no-speech') {
+          showVoiceStatus('No speech detected. Try again.', 3000);
+        } else if (event.error === 'aborted') {
+          // On mobile, this often happens - process whatever we have
+          if (finalTranscriptBuffer.trim()) {
+            showVoiceStatus(`Processing: "${finalTranscriptBuffer.trim()}"`, 5000);
+            processSpeech(finalTranscriptBuffer.trim());
+            finalTranscriptBuffer = '';
+          } else {
+            showVoiceStatus('Recognition aborted. Try again.', 3000);
+          }
+        } else if (event.error === 'network') {
+          speak("Network error. Check your connection.");
+        } else {
+          showVoiceStatus(`Error: ${event.error}`, 3000);
+        }
         render();
       };
 
-      recognition.start();
+      try {
+        recognition.start();
+      } catch (e) {
+        console.error('Failed to start recognition:', e);
+        showVoiceStatus('Failed to start voice. Try again.', 3000);
+      }
     }
 
     async function processSpeech(speech) {
